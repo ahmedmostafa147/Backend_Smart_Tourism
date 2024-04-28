@@ -31,7 +31,7 @@ from starlette.middleware.sessions import SessionMiddleware
 app.add_middleware(SessionMiddleware, secret_key="8c87d814d4be0ddc08364247da359a61941957e84f62f3cd0e87eb5d853a4144")
 
 
-DATABASE_URL = r"mssql+pyodbc://DESKTOP-G8JOIIS/tourism?driver=ODBC+Driver+17+for+SQL+Server&Trusted_Connection=yes"
+DATABASE_URL = "mssql+pyodbc://db_aa8202_tourism_admin:ABCD1234@SQL5113.site4now.net/db_aa8202_tourism?driver=ODBC+Driver+17+for+SQL+Server"
 engine = create_engine(DATABASE_URL)
 metadata = MetaData()
 
