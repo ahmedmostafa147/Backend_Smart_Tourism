@@ -17,11 +17,14 @@ from sqlalchemy.ext.declarative import declarative_base
 from fastapi_session import Session
 import secrets
 from datetime import datetime
+from sqlalchemy.orm import declarative_base
 
 
 load_dotenv()
 
 app = FastAPI()
+
+
 
 SECRET_KEY = "d38b291ccebc18af95d4df97a0a98f9bb9eea3c820e771096fa1c5e3a58f3d53"
 ALGORITHM = "HS256"
