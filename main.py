@@ -18,6 +18,7 @@ from fastapi_session import Session
 import secrets
 from datetime import datetime
 
+
 load_dotenv()
 
 app = FastAPI()
