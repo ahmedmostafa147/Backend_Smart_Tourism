@@ -35,7 +35,7 @@ app.add_middleware(SessionMiddleware, secret_key="8c87d814d4be0ddc08364247da359a
 
 
 DATABASE_URL = "mssql+pyodbc://db_aa8202_tourism_admin:ABCD1234@SQL5113.site4now.net/db_aa8202_tourism?driver=ODBC+Driver+17+for+SQL+Server"
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
 metadata = MetaData()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
