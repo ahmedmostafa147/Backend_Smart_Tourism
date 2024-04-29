@@ -739,5 +739,7 @@ async def protected_endpoint(current_user: str = Depends(get_current_user), db: 
 async def unprotected_endpoint():
 
     return {"message": "This endpoint is accessible without authentication."}
-
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
 
