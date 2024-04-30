@@ -18,6 +18,8 @@ from fastapi_session import Session
 import secrets
 from datetime import datetime
 from sqlalchemy.orm import declarative_base
+from jwt import encode
+
 
 
 load_dotenv()
@@ -145,7 +147,7 @@ def update_user(user_email: str, updated_user: UserUpdate):
 
 UTC = timezone.utc
 def create_access_token(data: dict):
-    encoded_jwt = jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = encode(data, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
 def get_user_from_token(token: str):
