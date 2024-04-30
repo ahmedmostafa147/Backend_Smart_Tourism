@@ -146,8 +146,8 @@ def update_user(user_email: str, updated_user: UserUpdate):
 
 
 UTC = timezone.utc
-def create_access_token(data: dict):
-    encoded_jwt = encode(data, SECRET_KEY, algorithm=ALGORITHM)
+def create_access_token(data: dict, secret_key: str):
+    encoded_jwt = jwt.encode(data, secret_key, algorithm=ALGORITHM)
     return encoded_jwt
 
 def get_user_from_token(token: str):
@@ -194,7 +194,8 @@ async def login(user: UserLogin):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token = create_access_token(data={"sub": user_email})
+    # Call create_access_token function with SECRET_KEY
+    access_token = create_access_token(data={"sub": user_email}, secret_key=SECRET_KEY)
     return {"access_token": access_token, "token_type": "bearer", "message": "Login successful"}
 
 
@@ -286,9 +287,6 @@ async def get_recent_searches(current_user: str = Depends(get_current_user), db:
         return {"recent_searches": recent_searches}
     else:
         return {"message": "User not found."}
-
-
-
 
 
 @app.put("/change_password")
