@@ -17,14 +17,10 @@ from sqlalchemy.ext.declarative import declarative_base
 from fastapi_session import Session
 import secrets
 from datetime import datetime
-from sqlalchemy.orm import declarative_base
-
 
 load_dotenv()
 
 app = FastAPI()
-
-
 
 SECRET_KEY = "d38b291ccebc18af95d4df97a0a98f9bb9eea3c820e771096fa1c5e3a58f3d53"
 ALGORITHM = "HS256"
@@ -35,7 +31,7 @@ app.add_middleware(SessionMiddleware, secret_key="8c87d814d4be0ddc08364247da359a
 
 
 DATABASE_URL = "mssql+pyodbc://db_aa8202_tourism_admin:ABCD1234@SQL5113.site4now.net/db_aa8202_tourism?driver=ODBC+Driver+17+for+SQL+Server"
-engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
+engine = create_engine(DATABASE_URL)
 metadata = MetaData()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -739,6 +735,8 @@ async def protected_endpoint(current_user: str = Depends(get_current_user), db: 
 async def unprotected_endpoint():
 
     return {"message": "This endpoint is accessible without authentication."}
+    
 import uvicorn
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=80)
+
