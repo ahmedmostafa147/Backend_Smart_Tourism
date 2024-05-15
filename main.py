@@ -13,7 +13,7 @@ import jwt
 import random
 import asyncio
 from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from fastapi_session import Session
 import secrets
 from datetime import datetime
