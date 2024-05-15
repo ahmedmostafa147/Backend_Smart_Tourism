@@ -32,7 +32,7 @@ from starlette.middleware.sessions import SessionMiddleware
 app.add_middleware(SessionMiddleware, secret_key="8c87d814d4be0ddc08364247da359a61941957e84f62f3cd0e87eb5d853a4144")
 
 
-DATABASE_URL = f"mssql+pyodbc://DESKTOP-7CEAQTB/tourism?driver=ODBC+Driver+17+for+SQL+Server&Trusted_Connection=yes"
+DATABASE_URL = "mssql+pyodbc://db_aa8202_tourism_admin:ABCD1234@SQL5113.site4now.net/db_aa8202_tourism?driver=ODBC+Driver+17+for+SQL+Server"
 engine = create_engine(DATABASE_URL)
 metadata = MetaData()
 
@@ -858,4 +858,4 @@ async def unprotected_endpoint():
     return {"message": "This endpoint is accessible without authentication."}
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=80)
