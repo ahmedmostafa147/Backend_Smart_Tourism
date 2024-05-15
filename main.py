@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, status, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, constr, validator
 from sqlalchemy import create_engine, MetaData, select, Table, Column, Integer, String, ForeignKey, Boolean, DateTime
 from passlib.context import CryptContext
 from authlib.integrations.starlette_client import OAuth
@@ -17,6 +17,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from fastapi_session import Session
 import secrets
 from datetime import datetime
+from sqlalchemy.orm import joinedload
+
 
 load_dotenv()
 
@@ -30,7 +32,7 @@ from starlette.middleware.sessions import SessionMiddleware
 app.add_middleware(SessionMiddleware, secret_key="8c87d814d4be0ddc08364247da359a61941957e84f62f3cd0e87eb5d853a4144")
 
 
-DATABASE_URL = "mssql+pyodbc://db_aa8202_tourism_admin:ABCD1234@SQL5113.site4now.net/db_aa8202_tourism?driver=ODBC+Driver+17+for+SQL+Server"
+DATABASE_URL = f"mssql+pyodbc://DESKTOP-7CEAQTB/tourism?driver=ODBC+Driver+17+for+SQL+Server&Trusted_Connection=yes"
 engine = create_engine(DATABASE_URL)
 metadata = MetaData()
 
@@ -56,12 +58,22 @@ def query_database(country: str, governorate: str, category: str, name: str) -> 
 
 
 class UserRegistration(BaseModel):
-    first_name: str
-    last_name: str
+    first_name: constr(min_length=3, max_length=8)
+    last_name: constr(min_length=3, max_length=8)
     user_password: str
     user_email: EmailStr
     user_location: Optional[str] = None
+    @classmethod
+    def validate_email_domain(cls, email: str):
+        allowed_domains = ["yahoo.com", "gmail.com", "mail.com", "outlook.com", "hotmail.com"]
+        email_domain = email.split('@')[1]
+        if email_domain not in allowed_domains:
+            raise ValueError("Only Yahoo, Gmail, Mail, Outlook, and Hotmail domains are allowed")
 
+    @validator("user_email")
+    def validate_email(cls, v):
+        cls.validate_email_domain(v)
+        return v
 class UserLogin(BaseModel):
     user_email: EmailStr
     user_password: str
@@ -173,7 +185,19 @@ async def register(user: UserRegistration):
     if result:
         raise HTTPException(status_code=400, detail="User with this email already registered")
 
-    register_user(user)
+    first_name = user.first_name.capitalize()
+    last_name = user.last_name.capitalize()
+
+    if len(first_name) < 3 or len(first_name) > 8 or len(last_name) < 3 or len(last_name) > 8:
+        raise HTTPException(status_code=400, detail="Invalid first or last name length")
+
+    register_user(UserRegistration(
+        first_name=first_name,
+        last_name=last_name,
+        user_password=user.user_password,
+        user_email=user.user_email,
+        user_location=user.user_location,
+    ))
     return {"message": "Registration successful"}
 
 @app.post("/login")
@@ -229,48 +253,65 @@ def get_db():
 recent_searches = []
 
 class RecentSearch(Base):
-    __tablename__ = 'recent_searches'
+    __tablename__ = 'recent_searches'  
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer)
+    user_id = Column(Integer, ForeignKey('users.user_id'))  
     country = Column(String)
     governorate = Column(String)
     category = Column(String)
     name = Column(String)
 
+
+class SearchParams(BaseModel):
+    country: Optional[str] = "string"
+    governorate: Optional[str] = "string"
+    category: Optional[str] = "string"
+    name: Optional[str] = "string"
+
 @app.post("/search")
 async def search(
-    country: str,
-    governorate: str,
-    category: str,
-    name: str,
+    search_params: SearchParams,
     current_user: str = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    user = db.query(User).filter(User.user_email == current_user).first()
-    if user:
+    try:
+        user = db.query(User).filter(User.user_email == current_user).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+
         recent_search = RecentSearch(
             user_id=user.user_id,
-            country=country,
-            governorate=governorate,
-            category=category,
-            name=name
+            country=search_params.country,
+            governorate=search_params.governorate,
+            category=search_params.category,
+            name=search_params.name
         )
         db.add(recent_search)
-
-        recent_search_count = db.query(RecentSearch).filter(RecentSearch.user_id == user.user_id).count()
-
-        if recent_search_count > 10:
-            oldest_searches = db.query(RecentSearch).filter(RecentSearch.user_id == user.user_id).order_by(RecentSearch.id.asc()).limit(recent_search_count - 10).all()
-            for search in oldest_searches:
-                db.delete(search)
-
         db.commit()
 
-        search_results = query_database(country, governorate, category, name)
+        recent_searches = db.query(RecentSearch).filter(RecentSearch.user_id == user.user_id).order_by(RecentSearch.id.desc()).all()
+
+        if len(recent_searches) > 10:
+            oldest_searches_to_delete = recent_searches[10:]
+            for search_to_delete in oldest_searches_to_delete:
+                db.delete(search_to_delete)
+            db.commit()
+
+        search_results = query_database(
+            search_params.country,
+            search_params.governorate,
+            search_params.category,
+            search_params.name
+        )
         return {"results": search_results}
-    else:
-        return {"message": "User not found."}
+    except SQLAlchemyError as e:
+        db.rollback()
+        return {"message": f"Database error: {str(e)}"}
+    finally:
+        db.close()
+
+
 
 @app.get("/recent_searches")
 async def get_recent_searches(current_user: str = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -398,8 +439,7 @@ async def send_notification_endpoint(user_email: str, background_tasks: Backgrou
 # -----------------------------------------------------------------
 
 
-# Define other tables using declarative syntax
-# Base = declarative_base()
+
 
 class User(Base):
     __tablename__ = 'users'
@@ -431,7 +471,6 @@ class Place(Base):
     place_id = Column(Integer, primary_key=True)
     place_name = Column(String(255), nullable=False)
     price = Column(Integer, nullable=False)
-    favorite = Column(Boolean)
     gps = Column(String(255), nullable=False)
     place_loc = Column(String(255), nullable=False)
     place_image = Column(String(255), nullable=False)
@@ -442,7 +481,6 @@ class Hotel(Base):
     hotel_id = Column(Integer, primary_key=True)
     hotel_name = Column(String(255), nullable=False)
     price = Column(Integer, nullable=False)
-    favorite = Column(Boolean)
     gps = Column(String(255), nullable=False)
     hotel_loc = Column(String(255), nullable=False)
     hotel_image = Column(String(255), nullable=False)
@@ -454,7 +492,7 @@ class Restaurant(Base):
     rest_id = Column(Integer, primary_key=True)
     rest_name = Column(String(255), nullable=False)
     price = Column(Integer, nullable=False)
-    favorite = Column(Boolean)
+    #favorite = Column(Boolean)
     gps = Column(String(255), nullable=False)
     rest_loc = Column(String(255), nullable=False)
     rest_image = Column(String(255), nullable=False)
@@ -486,16 +524,15 @@ plan_restaurant = Table('plan_restaurant', Base.metadata,
     Column('rest_id', Integer, ForeignKey('restaurants.rest_id'))
 )
 
-# Define request models
 class PlanCreate(BaseModel):
     plan_budget: int
     plan_review: str = None
     plan_duration: int
     destination: str
     plan_is_recommended: bool
-    places: list = []
-    hotels: list = []
-    restaurants: list = []
+    restaurant_names: List[str] = []
+    hotel_names: List[str] = []
+    place_names: List[str] = []
 
 class Favorite(Base):
         __tablename__ = "favorites"
@@ -535,87 +572,157 @@ def delete_favorite(db: Session, fav_id: int):
 # Database session setup
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Dependency to get the database session
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
 @app.post("/create_plan")
-async def create_plan(plan_data: PlanCreate, current_user: str = Depends(get_current_user)):
+async def create_plan(
+        plan_data: PlanCreate,
+        current_user: str = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
     """
     Create a plan for the current user.
     """
-    db = SessionLocal()
     try:
-        # Fetch user details based on the current user's email
         user = db.query(User).filter(User.user_email == current_user).first()
-        if user:
-            # Create Plan instance
-            plan = Plan(
-                plan_budget=plan_data.plan_budget,
-                plan_review=plan_data.plan_review,
-                plan_duration=plan_data.plan_duration,
-                destination=plan_data.destination,
-                plan_is_recommended=plan_data.plan_is_recommended
-            )
-            db.add(plan)
-            db.flush()  # This ensures plan_id is populated
-
-            # Associate the user_id with the plan
-            user_plan = UserPlan(user_id=user.user_id, plan_id=plan.plan_id)
-            db.add(user_plan)
-
-            # Add places to plan
-            for place_id in plan_data.places:
-                db.execute(plan_place.insert().values(plan_id=plan.plan_id, place_id=place_id))
-
-            # Add hotels to plan
-            for hotel_id in plan_data.hotels:
-                db.execute(plan_hotel.insert().values(plan_id=plan.plan_id, hotel_id=hotel_id))
-
-            # Add restaurants to plan
-            for rest_id in plan_data.restaurants:
-                db.execute(plan_restaurant.insert().values(plan_id=plan.plan_id, rest_id=rest_id))
-
-            db.commit()
-            return {"message": "Plan created successfully"}
-        else:
+        if not user:
             raise HTTPException(status_code=404, detail="User not found")
+
+        # Check if the destination exists
+        destination = plan_data.destination
+        country_exists = db.query(Place).filter(Place.place_loc.ilike(f"%{destination}%")).first()
+        if not country_exists:
+            raise HTTPException(status_code=404, detail=f"Country '{destination}' not found in the database")
+
+        # Check if all specified places, hotels, and restaurants exist in the destination
+        places_not_found = []
+        for place_name in plan_data.place_names:
+            place = db.query(Place).filter(Place.place_name == place_name,
+                                           Place.place_loc.ilike(f"%{destination}%")).first()
+            if not place:
+                places_not_found.append(place_name)
+
+        hotels_not_found = []
+        for hotel_name in plan_data.hotel_names:
+            hotel = db.query(Hotel).filter(Hotel.hotel_name == hotel_name,
+                                           Hotel.hotel_loc.ilike(f"%{destination}%")).first()
+            if not hotel:
+                hotels_not_found.append(hotel_name)
+
+        restaurants_not_found = []
+        for rest_name in plan_data.restaurant_names:
+            restaurant = db.query(Restaurant).filter(Restaurant.rest_name == rest_name,
+                                                     Restaurant.rest_loc.ilike(f"%{destination}%")).first()
+            if not restaurant:
+                restaurants_not_found.append(rest_name)
+
+        if places_not_found or hotels_not_found or restaurants_not_found:
+            not_found_message = ""
+            if places_not_found:
+                not_found_message += f"Places not found: {', '.join(places_not_found)}. "
+            if hotels_not_found:
+                not_found_message += f"Hotels not found: {', '.join(hotels_not_found)}. "
+            if restaurants_not_found:
+                not_found_message += f"Restaurants not found: {', '.join(restaurants_not_found)}. "
+
+            return {"message": "Plan not created", "missing_entries": not_found_message}
+
+        # Create Plan instance
+        plan = Plan(
+            plan_budget=plan_data.plan_budget,
+            plan_review=plan_data.plan_review,
+            plan_duration=plan_data.plan_duration,
+            destination=destination,
+            plan_is_recommended=plan_data.plan_is_recommended
+        )
+        db.add(plan)
+        db.flush()
+
+        user_plan = UserPlan(user_id=user.user_id, plan_id=plan.plan_id)
+        db.add(user_plan)
+
+        for place_name in plan_data.place_names:
+            place = db.query(Place).filter(Place.place_name == place_name,
+                                           Place.place_loc.ilike(f"%{destination}%")).first()
+            db.execute(plan_place.insert().values(plan_id=plan.plan_id, place_id=place.place_id))
+
+        for hotel_name in plan_data.hotel_names:
+            hotel = db.query(Hotel).filter(Hotel.hotel_name == hotel_name,
+                                           Hotel.hotel_loc.ilike(f"%{destination}%")).first()
+            db.execute(plan_hotel.insert().values(plan_id=plan.plan_id, hotel_id=hotel.hotel_id))
+
+        for rest_name in plan_data.restaurant_names:
+            restaurant = db.query(Restaurant).filter(Restaurant.rest_name == rest_name,
+                                                     Restaurant.rest_loc.ilike(f"%{destination}%")).first()
+            db.execute(plan_restaurant.insert().values(plan_id=plan.plan_id, rest_id=restaurant.rest_id))
+
+        db.commit()
+
+        return {"message": "Plan created successfully"}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create plan: {e}")
     finally:
         db.close()
 
-@app.get("/user_plans")
-async def user_plans(current_user: str = Depends(get_current_user)):
-    """
-    Retrieve plans for the current user.
-    """
-    db = SessionLocal()
+
+class SavedPlanResponse(BaseModel):
+    plan_budget: int
+    plan_review: Optional[str]
+    plan_duration: int
+    destination: str
+    plan_is_recommended: bool
+    places: List[str] = []
+    hotels: List[str] = []
+    restaurants: List[str] = []
+
+
+@app.get("/history plans")
+async def get_saved_plans(current_user: str = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        # Fetch user details based on the current user's email
         user = db.query(User).filter(User.user_email == current_user).first()
         if user:
-            user_plans = db.query(UserPlan).join(Plan).filter(UserPlan.user_id == user.user_id).all()
-            return user_plans
+            user_plans = db.query(UserPlan).join(Plan).options(joinedload(UserPlan.plan)).filter(UserPlan.user_id == user.user_id).all()
+
+            saved_plans_response = []
+            for user_plan in user_plans:
+                saved_plan = SavedPlanResponse(
+                    plan_budget=user_plan.plan.plan_budget,
+                    plan_review=user_plan.plan.plan_review,
+                    plan_duration=user_plan.plan.plan_duration,
+                    destination=user_plan.plan.destination,
+                    plan_is_recommended=user_plan.plan.plan_is_recommended
+                )
+
+
+                places = db.query(Place.place_name).join(plan_place).filter(plan_place.c.plan_id == user_plan.plan_id).all()
+                saved_plan.places = [place[0] for place in places]
+
+
+                hotels = db.query(Hotel.hotel_name).join(plan_hotel).filter(plan_hotel.c.plan_id == user_plan.plan_id).all()
+                saved_plan.hotels = [hotel[0] for hotel in hotels]
+
+
+                restaurants = db.query(Restaurant.rest_name).join(plan_restaurant).filter(plan_restaurant.c.plan_id == user_plan.plan_id).all()
+                saved_plan.restaurants = [restaurant[0] for restaurant in restaurants]
+
+                saved_plans_response.append(saved_plan)
+
+            return {"user_plans": saved_plans_response}
         else:
-            raise HTTPException(status_code=404, detail="User not found")
+            return {"message": "User not found."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch user plans: {e}")
     finally:
         db.close()
 
 
-@app.get("/plan_history/")
-async def plan_history():
-    db = SessionLocal()
-    try:
-        plans = db.query(UserPlan).all()
-        return plans
-    finally:
-        db.close()
-from typing import List
 class FavoriteCreate(BaseModel):
     type: str
     name: str
@@ -630,10 +737,8 @@ def create_favorite_endpoint(
     Create a favorite for the current user.
     """
     try:
-        # Fetch user details based on the current user's email
         user = db.query(User).filter(User.user_email == current_user_email).first()
         if user:
-            # Create the favorite using the provided data
             favorite = create_favorite(
                 db=db,
                 user_id=user.user_id,
@@ -655,10 +760,8 @@ def delete_favorite_endpoint(
     Delete a favorite for the current user.
     """
     try:
-        # Fetch user details based on the current user's email
         user = db.query(User).filter(User.user_email == current_user_email).first()
         if user:
-            # Delete the favorite
             result = delete_favorite(db=db, fav_id=fav_id)
             return result
         else:
@@ -687,12 +790,10 @@ class Option(Base):
 async def survey(survey_response: SurveyResponse, current_user_email: str = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        # Fetch user ID based on the current user's email
         user = db.query(User).filter(User.user_email == current_user_email).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Create survey entry
         survey = Survey(user_id=user.user_id)  # Using the current user's ID obtained from the database
         db.add(survey)
         db.commit()
@@ -711,6 +812,26 @@ async def survey(survey_response: SurveyResponse, current_user_email: str = Depe
     finally:
         db.close()
 
+@app.get("/out-put survey")
+async def get_user_survey(current_user: str = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        user = db.query(User).filter(User.user_email == current_user).first()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        survey = db.query(Survey).filter(Survey.user_id == user.user_id).order_by(Survey.survey_id.desc()).first()
+
+        if not survey:
+            raise HTTPException(status_code=404, detail="Survey not found for the current user")
+
+        options = db.query(Option).filter(Option.survey_id == survey.survey_id).all()
+
+        categories = [option.category for option in options]
+
+        return {"categories": categories}  
+    except SQLAlchemyError as e:
+        return {"message": f"Database error: {str(e)}"}
 
 @app.get("/protected")
 async def protected_endpoint(current_user: str = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -735,8 +856,3 @@ async def protected_endpoint(current_user: str = Depends(get_current_user), db: 
 async def unprotected_endpoint():
 
     return {"message": "This endpoint is accessible without authentication."}
-    
-import uvicorn
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=80)
-
