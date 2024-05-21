@@ -9,15 +9,31 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 from typing import List, Optional
 from datetime import timezone
-import jwt
 import random
 import asyncio
+from jose import JWTError, jwt
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.orm import declarative_base
 from fastapi_session import Session
 import secrets
 from datetime import datetime
 from sqlalchemy.orm import joinedload
+from fastapi import FastAPI, HTTPException, status, Depends, BackgroundTasks
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel, EmailStr, constr, validator
+from sqlalchemy import create_engine, MetaData, select, Table, Column, Integer, String, ForeignKey, Boolean, DateTime
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker, relationship, declarative_base
+from passlib.context import CryptContext
+from dotenv import load_dotenv
+from starlette.requests import Request
+from starlette.middleware.sessions import SessionMiddleware
+from typing import List, Optional
+from datetime import datetime, timezone
+import random
+import secrets
+from jose import JWTError, jwt
+
 
 
 load_dotenv()

@@ -32,4 +32,8 @@ SQLAlchemy==2.0.25
 starlette==0.36.3
 typing_extensions==4.9.0
 uvicorn==0.27.0.post1
-
+<<<<<<< HEAD
+python-jose[cryptography]
+=======
+jose
+>>>>>>> main
