@@ -1,10 +1,10 @@
 from datetime import datetime
 from sqlalchemy.orm import relationship
-from database import Base
+from data.database import Base
 from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime, Table
 from datetime import datetime
 from sqlalchemy.orm import relationship
-from database import Base
+from data.database import Base
 from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime, Table
 
 class User(Base):

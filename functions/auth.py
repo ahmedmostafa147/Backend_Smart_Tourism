@@ -1,13 +1,13 @@
 from fastapi.requests import Request
 from sqlalchemy import select
-from database import get_db, engine
-from models import User
+from data.database import get_db, engine
+from helper.models import User
 from authlib.integrations.starlette_client import OAuth
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
-from schemas import UserRegistration, UserLogin, UserUpdate
+from helper.schemas import UserRegistration, UserLogin, UserUpdate
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 import secrets

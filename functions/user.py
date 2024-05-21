@@ -1,14 +1,14 @@
 import random
 from fastapi import APIRouter, Depends
-from auth import get_current_user
+from functions.auth import get_current_user
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-from database import SessionLocal
-from models import ForUser, Survey, Option, Notification,User, UserPlan, Plan, Place, plan_place, Hotel, plan_hotel, Restaurant, plan_restaurant, Survey, Option
+from data.database import SessionLocal
+from helper.models import ForUser, Survey, Option, Notification,User, UserPlan, Plan, Place, plan_place, Hotel, plan_hotel, Restaurant, plan_restaurant, Survey, Option
 import asyncio
 from sqlalchemy.exc import SQLAlchemyError
-from database import get_db
-from schemas import  SurveyResponse, PlanCreate, Notification
+from data.database import get_db
+from helper.schemas import  SurveyResponse, PlanCreate, Notification
 from sqlalchemy.orm import joinedload
 
 router = APIRouter()

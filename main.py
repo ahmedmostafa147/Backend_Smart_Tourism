@@ -9,9 +9,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 from typing import List, Optional
 from datetime import timezone
-import jwt
 import random
 import asyncio
+from jose import JWTError, jwt
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.orm import declarative_base
 from fastapi_session import Session
