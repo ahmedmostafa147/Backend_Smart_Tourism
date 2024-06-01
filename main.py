@@ -3,38 +3,32 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr, constr, validator
 from sqlalchemy import create_engine, MetaData, select, Table, Column, Integer, String, ForeignKey, Boolean, DateTime
 from passlib.context import CryptContext
-from authlib.integrations.starlette_client import OAuth
 from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 from typing import List, Optional
 from datetime import timezone
-import random
-import asyncio
-from jose import JWTError, jwt
+import jwt
 from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.ext.declarative import declarative_base
 from fastapi_session import Session
 import secrets
 from datetime import datetime
 from sqlalchemy.orm import joinedload
-from fastapi import FastAPI, HTTPException, status, Depends, BackgroundTasks
-from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr, constr, validator
-from sqlalchemy import create_engine, MetaData, select, Table, Column, Integer, String, ForeignKey, Boolean, DateTime
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import sessionmaker, relationship, declarative_base
-from passlib.context import CryptContext
-from dotenv import load_dotenv
-from starlette.requests import Request
+from fastapi.responses import RedirectResponse
+from starlette.config import Config
+from urllib.parse import urlencode
+import httpx
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr
+from sqlalchemy.exc import IntegrityError
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+import re
 from starlette.middleware.sessions import SessionMiddleware
-from typing import List, Optional
-from datetime import datetime, timezone
-import random
-import secrets
-from jose import JWTError, jwt
-
-
+import os
 
 load_dotenv()
 
@@ -43,7 +37,6 @@ app = FastAPI()
 SECRET_KEY = "d38b291ccebc18af95d4df97a0a98f9bb9eea3c820e771096fa1c5e3a58f3d53"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
-from starlette.middleware.sessions import SessionMiddleware
 
 app.add_middleware(SessionMiddleware, secret_key="8c87d814d4be0ddc08364247da359a61941957e84f62f3cd0e87eb5d853a4144")
 
@@ -74,9 +67,9 @@ def query_database(country: str, governorate: str, category: str, name: str) -> 
 
 
 class UserRegistration(BaseModel):
-    first_name: constr(min_length=3, max_length=8)
-    last_name: constr(min_length=3, max_length=8)
-    user_password: str
+    first_name: constr(min_length=3, max_length=16)
+    last_name: constr(min_length=3, max_length=16)
+    user_password: constr(min_length=8,max_length=64)
     user_email: EmailStr
     user_location: Optional[str] = None
     @classmethod
@@ -90,6 +83,24 @@ class UserRegistration(BaseModel):
     def validate_email(cls, v):
         cls.validate_email_domain(v)
         return v
+
+    @validator("user_password")
+    def validate_password(cls, v):
+        errors = []
+        if len(v) < 8 or len(v) > 64:
+            errors.append("Password must be between 8 and 64 characters long")
+        if not re.search(r'[A-Z]', v):
+            errors.append("Password must contain at least one uppercase letter")
+        if not re.search(r'[a-z]', v):
+            errors.append("Password must contain at least one lowercase letter")
+        if not re.search(r'\d', v):
+            errors.append("Password must contain at least one number")
+        if not re.search(r'[@$!%*?&]', v):
+            errors.append("Password must contain at least one special character (@$!%*?&)")
+        if errors:
+            raise ValueError(", ".join(errors))
+        return v
+
 class UserLogin(BaseModel):
     user_email: EmailStr
     user_password: str
@@ -100,24 +111,7 @@ class UserUpdate(BaseModel):
     last_name: str
     user_location: str
 
-oauth = OAuth()
-oauth.register(
-    name='google',
-    client_id='661608121084-ujv3v7ptoc1dtr1mp7hegarnrtfsceas.apps.googleusercontent.com',
-    client_secret='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',
-    authorize_url='https://accounts.google.com/o/oauth2/auth',
-    authorize_params={'scope': 'openid email profile'},
-    access_token_url='https://accounts.google.com/o/oauth2/token',
-    access_token_params=None,
-    userinfo_url='https://openidconnect.googleapis.com/v1/userinfo',
-    userinfo_params=None,
-    client_kwargs={
-        'token_endpoint_auth_method': 'client_secret_post',
-        'prompt': 'consent',
-        'response_type': 'code id_token',
-        'jwks_uri': 'https://www.googleapis.com/oauth2/v3/certs'
-    }
-)
+
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -138,17 +132,64 @@ def verify_user_credentials(user_email: str, user_password: str):
         return True
     return False
 
-
 def register_user(user: UserRegistration):
+    if not re.match("^(?=.*[a-zA-Z])[a-zA-Z0-9]*$", user.first_name):
+        raise HTTPException(status_code=400, detail="First name must contain at least one letter")
+
+    if not re.match("^(?=.*[a-zA-Z])[a-zA-Z0-9]*$", user.last_name):
+        raise HTTPException(status_code=400, detail="Last name must contain at least one letter")
     conn = engine.connect()
-    conn.execute(users.insert().values(
-        first_name=user.first_name,
-        last_name=user.last_name,
-        user_password=hash_password(user.user_password),
-        user_email=user.user_email,
-        user_location=user.user_location,
-    ))
-    conn.commit()
+    try:
+        conn.execute(users.insert().values(
+            first_name=user.first_name,
+            last_name=user.last_name,
+            user_password=hash_password(user.user_password),
+            user_email=user.user_email,
+            user_location=user.user_location,
+        ))
+        conn.commit()
+    except IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="User with this email already registered")
+    finally:
+        conn.close()
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    for error in errors:
+        if error['loc'][-1] == 'first_name':
+            return JSONResponse(
+                status_code=400,
+                content={"message": "First name length must be between 3 and 16 characters"}
+            )
+        if error['loc'][-1] == 'last_name':
+            return JSONResponse(
+                status_code=400,
+                content={"message": "Last name length must be between 3 and 16 characters"}
+            )
+
+        if error['loc'][-1] == 'user_email':
+            return JSONResponse(
+                status_code=400,
+                content={"message": "Only Yahoo, Gmail, Mail, Outlook, and Hotmail domains are allowed"}
+            )
+        if error['loc'][-1] == 'user_password':
+            return JSONResponse(
+                status_code=400,
+                content={"message": error['msg']}
+            )
+    return JSONResponse(
+        status_code=400,
+        content={"message": "Invalid input"}
+    )
+
+@app.exception_handler(HTTPException)
+async def custom_http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"message": exc.detail},
+    )
 
 
 def delete_user(user_email: str):
@@ -158,13 +199,27 @@ def delete_user(user_email: str):
 
 
 def update_user(user_email: str, updated_user: UserUpdate):
+    if not re.match("^(?=.*[a-zA-Z])[a-zA-Z0-9]*$", updated_user.first_name):
+        raise HTTPException(status_code=400, detail="First name must contain at least one letter")
+
+    if not re.match("^(?=.*[a-zA-Z])[a-zA-Z0-9]*$", updated_user.last_name):
+        raise HTTPException(status_code=400, detail="Last name must contain at least one letter")
+
+    if len(updated_user.first_name) < 3 or len(updated_user.first_name) > 16:
+        raise HTTPException(status_code=400, detail="First name length must be between 3 and 16 characters")
+
+    if len(updated_user.last_name) < 3 or len(updated_user.last_name) > 16:
+        raise HTTPException(status_code=400, detail="Last name length must be between 3 and 16 characters")
+
     conn = engine.connect()
     conn.execute(users.update().where(users.c.user_email == user_email).values(
-        first_name=updated_user.first_name,
-        last_name=updated_user.last_name,
+        first_name=updated_user.first_name.capitalize(),
+        last_name=updated_user.last_name.capitalize(),
         user_location=updated_user.user_location,
     ))
     conn.commit()
+    conn.close()
+
 
 
 UTC = timezone.utc
@@ -191,6 +246,8 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         return user_email
     except jwt.JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
 @app.post("/register")
 async def register(user: UserRegistration):
     conn = engine.connect()
@@ -204,8 +261,11 @@ async def register(user: UserRegistration):
     first_name = user.first_name.capitalize()
     last_name = user.last_name.capitalize()
 
-    if len(first_name) < 3 or len(first_name) > 8 or len(last_name) < 3 or len(last_name) > 8:
-        raise HTTPException(status_code=400, detail="Invalid first or last name length")
+    if len(first_name) < 3 or len(first_name) > 16:
+        raise HTTPException(status_code=400, detail="First name length must be between 3 and 16 characters")
+
+    if len(last_name) < 3 or len(last_name) > 16:
+        raise HTTPException(status_code=400, detail="Last name length must be between 3 and 16 characters")
 
     register_user(UserRegistration(
         first_name=first_name,
@@ -214,6 +274,7 @@ async def register(user: UserRegistration):
         user_email=user.user_email,
         user_location=user.user_location,
     ))
+
     return {"message": "Registration successful"}
 
 @app.post("/login")
@@ -224,7 +285,7 @@ async def login(user: UserLogin):
     if not verify_user_credentials(user_email, user_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
+            detail="Invalid email or password. please try again",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -244,19 +305,50 @@ async def update(updated_user: UserUpdate, current_user: str = Depends(get_curre
     return {"message": "User updated successfully"}
 
 
+
 @app.put("/reset_password")
-async def reset_password(user_identifier: str, new_password: str):
+async def reset_password(user_email: str, new_password: str):
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", user_email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+
+    email_domain = user_email.split('@')[1]
+
+    allowed_domains = ["yahoo.com", "gmail.com", "mail.com", "outlook.com", "hotmail.com"]
+    if email_domain not in allowed_domains:
+        raise HTTPException(status_code=400, detail="Only Yahoo, Gmail, Mail, Outlook, and Hotmail domains are allowed")
+
     conn = engine.connect()
+    query = select(users.c.user_email).where(users.c.user_email == user_email)
+    result = conn.execute(query).fetchone()
+    conn.close()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    errors = []
+    if len(new_password) < 8 or len(new_password) > 64:
+        errors.append("Password must be between 8 and 64 characters long")
+    if not re.search(r'[A-Z]', new_password):
+        errors.append("Password must contain at least one uppercase letter")
+    if not re.search(r'[a-z]', new_password):
+        errors.append("Password must contain at least one lowercase letter")
+    if not re.search(r'\d', new_password):
+        errors.append("Password must contain at least one number")
+    if not re.search(r'[@$!%*?&]', new_password):
+        errors.append("Password must contain at least one special character (@$!%*?&)")
+    if errors:
+        raise HTTPException(status_code=400, detail=", ".join(errors))
+
+    # Hash the new password
     hashed_password = hash_password(new_password)
-    if '@' in user_identifier:
-        conn.execute(users.update().where(users.c.user_email == user_identifier).values(
-            user_password=hashed_password
-        ))
-    else:
-        conn.execute(users.update().where(users.c.user_id == int(user_identifier)).values(
-            user_password=hashed_password
-        ))
-    conn.commit()
+
+
+    conn = engine.connect()
+    conn.execute(users.update().where(users.c.user_email == user_email).values(
+        user_password=hashed_password
+    ))
+    conn.close()
+
     return {"message": "Password reset successful"}
 
 def get_db():
@@ -269,10 +361,10 @@ def get_db():
 recent_searches = []
 
 class RecentSearch(Base):
-    __tablename__ = 'recent_searches'  
+    __tablename__ = 'recent_searches'
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey('users.user_id'))  
+    user_id = Column(Integer)
     country = Column(String)
     governorate = Column(String)
     category = Column(String)
@@ -285,11 +377,15 @@ class SearchParams(BaseModel):
     category: Optional[str] = "string"
     name: Optional[str] = "string"
 
+
+from sqlalchemy import or_
+
+
 @app.post("/search")
 async def search(
-    search_params: SearchParams,
-    current_user: str = Depends(get_current_user),
-    db: Session = Depends(get_db)
+        search_params: SearchParams,
+        current_user: str = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
     try:
         user = db.query(User).filter(User.user_email == current_user).first()
@@ -306,7 +402,8 @@ async def search(
         db.add(recent_search)
         db.commit()
 
-        recent_searches = db.query(RecentSearch).filter(RecentSearch.user_id == user.user_id).order_by(RecentSearch.id.desc()).all()
+        recent_searches = db.query(RecentSearch).filter(RecentSearch.user_id == user.user_id).order_by(
+            RecentSearch.id.desc()).all()
 
         if len(recent_searches) > 10:
             oldest_searches_to_delete = recent_searches[10:]
@@ -314,19 +411,71 @@ async def search(
                 db.delete(search_to_delete)
             db.commit()
 
-        search_results = query_database(
-            search_params.country,
-            search_params.governorate,
-            search_params.category,
-            search_params.name
-        )
-        return {"results": search_results}
+        # Search in all three tables for matching results
+        search_results = db.query(Hotel).filter(
+            or_(
+                Hotel.hotel_loc.ilike(f"%{search_params.name}%"),
+                Hotel.hotel_name.ilike(f"%{search_params.name}%")
+            )
+        ).all()
+        search_results += db.query(Place).filter(
+            or_(
+                Place.place_loc.ilike(f"%{search_params.name}%"),
+                Place.place_name.ilike(f"%{search_params.name}%")
+            )
+        ).all()
+        search_results += db.query(Restaurant).filter(
+            or_(
+                Restaurant.rest_loc.ilike(f"%{search_params.name}%"),
+                Restaurant.rest_name.ilike(f"%{search_params.name}%")
+            )
+        ).all()
+
+        if not search_results:
+            return {"message": "No matching results found."}
+
+        # Transforming the results into dictionaries
+        results = []
+        for item in search_results:
+            if isinstance(item, Hotel):
+                results.append({
+                    "type": "hotel",
+                    "name": item.hotel_name,
+                    "price": item.price,
+                    "governorate": item.governorate,
+                    "country": item.hotel_loc,
+                    "image": item.hotel_image,
+                    "rate": item.rate
+
+                })
+            elif isinstance(item, Place):
+                results.append({
+                    "type": "place",
+                    "name": item.place_name,
+                    "price": item.price,
+                    "governorate": item.governorate,
+                    "country": item.place_loc,
+                    "image": item.place_image,
+                    "rate": item.rate
+                })
+            elif isinstance(item, Restaurant):
+                results.append({
+                    "type": "restaurant",
+                    "name": item.rest_name,
+                    "price": item.price,
+                    "governorate": item.governorate,
+                    "country": item.rest_loc,
+                    "image": item.rest_image,
+                    "rate": item.rate
+
+                })
+
+        return {"results": results}
     except SQLAlchemyError as e:
         db.rollback()
         return {"message": f"Database error: {str(e)}"}
     finally:
         db.close()
-
 
 
 @app.get("/recent_searches")
@@ -339,36 +488,39 @@ async def get_recent_searches(current_user: str = Depends(get_current_user), db:
         return {"message": "User not found."}
 
 
-
-
-
 @app.put("/change_password")
 async def change_password(current_password: str, new_password: str, current_user: str = Depends(get_current_user)):
     conn = engine.connect()
     query = select(users.c.user_password).where(users.c.user_email == current_user)
     result = conn.execute(query).fetchone()
-    conn.close()
+    if not result or not password_context.verify(current_password, result[0]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
 
-    if result:
-        current_hashed_password = result[0]
-        if password_context.verify(current_password, current_hashed_password):
-            hashed_new_password = hash_password(new_password)
-            conn = engine.connect()
-            conn.execute(users.update().where(users.c.user_email == current_user).values(
-                user_password=hashed_new_password
-            ))
-            conn.close()
-            return {"message": "Password changed successfully"}
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid current password"
-            )
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+    if current_password == new_password:
+        raise HTTPException(status_code=400, detail="New password must be different from the current password")
+
+    errors = []
+    if len(new_password) < 8 or len(new_password) > 64:
+        errors.append("Password must be between 8 and 64 characters long")
+    if not re.search(r'[A-Z]', new_password):
+        errors.append("Password must contain at least one uppercase letter")
+    if not re.search(r'[a-z]', new_password):
+        errors.append("Password must contain at least one lowercase letter")
+    if not re.search(r'\d', new_password):
+        errors.append("Password must contain at least one number")
+    if not re.search(r'[@$!%*?&]', new_password):
+        errors.append("Password must contain at least one special character (@$!%*?&)")
+    if errors:
+        raise HTTPException(status_code=400, detail=", ".join(errors))
+
+    hashed_new_password = hash_password(new_password)
+    conn.execute(users.update().where(users.c.user_email == current_user).values(user_password=hashed_new_password))
+    conn.commit()
+    conn.close()
+    return {"message": "Password changed successfully"}
+
+
+
 
 
 def get_db():
@@ -378,84 +530,120 @@ def get_db():
     finally:
         db.close()
 
+config = Config(".env")
+GOOGLE_CLIENT_ID = config("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = config("GOOGLE_CLIENT_SECRET")
+REDIRECT_URI = "http://smart-tourism-mjyq.onrender.com/auth/google/callback"
 
+GMAIL_USER = config("GMAIL_USER")
+GMAIL_PASSWORD = config("GMAIL_PASSWORD")
 
-@app.get("/login_google")
-async def login_google(request: Request):
-    state = secrets.token_urlsafe(16)
-    request.session['state'] = state
-    redirect_uri = request.url_for('google_callback')
-    return await oauth.google.authorize_redirect(request, redirect_uri, state=state)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-
-@app.get("/google_callback")
-async def google_callback(request: Request):
+def send_email(subject, message, recipient):
     try:
-        state = request.session.get('state')
-        if state is None:
-            raise HTTPException(status_code=400, detail="State parameter missing in session")
-        token = await oauth.google.authorize_access_token(request)
-        user_info = await oauth.google.parse_id_token(request, token)
+        msg = MIMEMultipart()
+        msg['From'] = formataddr(("Smart Tourism", GMAIL_USER))
+        msg['To'] = recipient
+        msg['Subject'] = subject
 
-        # Check if the state parameter in the callback matches the one in the session
-        if 'state' not in token or token['state'] != state:
-            raise HTTPException(status_code=400, detail="State parameter mismatch")
-
-        return {"token": token, "user_info": user_info}
-    except HTTPException as e:
-        raise e
+        message_lines = message.split("\n")
+        body = "\n".join(message_lines) + "\nWelcome to Smart Tourism Family!"
+        msg.attach(MIMEText(body, 'plain'))
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(GMAIL_USER, GMAIL_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(GMAIL_USER, recipient, text)
+        server.quit()
+        print('Email sent successfully')
     except Exception as e:
-        print(f"Google OAuth callback error: {e}")
-        raise HTTPException(status_code=400, detail="Google OAuth callback error")
+        print('Failed to send email:', str(e))
 
 
+@app.get("/auth/google")
+def auth_google():
+    google_auth_endpoint = "https://accounts.google.com/o/oauth2/auth"
+    query_params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "redirect_uri": REDIRECT_URI,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": "send_welcome_email"
+    }
 
+    return RedirectResponse(url=f"{google_auth_endpoint}?{urlencode(query_params)}")
 
+@app.get("/auth/google/callback")
+async def auth_google_callback(request: Request, background_tasks: BackgroundTasks):
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
 
-items_of_interest = ["restaurants", "hotels", "tours", "archaeological tourism", "for fun", "museum",
-                     "water places", "games", "religious tourism", "malls", "parks", "natural views"]
-@app.get("/may liked it")
-async def get_recommended_items(current_user: str = Depends(get_current_user)):
-    # Your existing code...
-    recommended_items = random.sample(items_of_interest, min(3, len(items_of_interest)))
-    return {"user_id": current_user, "recommended_items": recommended_items}
+    if not code:
+        raise HTTPException(status_code=400, detail="Authorization code not found")
+
+    token_url = "https://oauth2.googleapis.com/token"
+    token_data = {
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri": REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+
+    async with httpx.AsyncClient() as client:
+        token_response = await client.post(token_url, data=token_data)
+        token_json = token_response.json()
+
+    if "error" in token_json:
+        raise HTTPException(status_code=400, detail=token_json["error"])
+
+    access_token = token_json.get("access_token")
+
+    # Use the access token to get user info from Google
+    user_info_url = "https://www.googleapis.com/oauth2/v1/userinfo"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    async with httpx.AsyncClient() as client:
+        user_info_response = await client.get(user_info_url, headers=headers)
+        user_info = user_info_response.json()
+
+    user_email = user_info.get("email")
+    first_name = user_info.get("given_name", "DefaultFirstName")
+    last_name = user_info.get("family_name", "DefaultLastName")
+
+    if not user_email:
+        raise HTTPException(status_code=400, detail="Failed to retrieve necessary user information from Google")
+
+    conn = engine.connect()
+    query = select(users.c.user_email).where(users.c.user_email == user_email)
+    result = conn.execute(query).fetchone()
+
+    if not result:
+        user = UserRegistration(
+            first_name=first_name,
+            last_name=last_name,
+            user_password=secrets.token_urlsafe(16),  # Generate a random password
+            user_email=user_email,
+            user_location=None,
+        )
+        register_user(user)
+        background_tasks.add_task(send_email, "Welcome to Our Application!",
+                                  "Thank you for joining our application. We're excited to have you on board!",
+                                  user_email)
+
+    access_token = create_access_token(data={"sub": user_email})
+
+    return {"access_token": access_token, "token_type": "bearer", "message": "Login successful"}
+
 @app.post("/logout")
 async def logout(current_user: str = Depends(get_current_user)):
     """
 ليه ياعم تخرج ما انت منورنا والله!!!!!
     """
     return {"message": "Logout successful"}
-
-class Notification(BaseModel):
-    user_email: str
-    message: str
-
-user_notifications = {}
-
-def send_notification(notification: Notification):
-    print(f"Sending notification to user {notification.user_email}: {notification.message}")
-    if notification.user_email not in user_notifications:
-        user_notifications[notification.user_email] = []
-    user_notifications[notification.user_email].append(notification.message)
-
-async def schedule_notifications():
-    while True:
-
-        await asyncio.sleep(24 * 3600)
-        for user_email, message in user_notifications.items():
-            notification = Notification(user_email=user_email, message=message)
-            send_notification(notification)
-
-@app.get("/send_notification")
-async def send_notification_endpoint(user_email: str, background_tasks: BackgroundTasks):
-    default_message = "Reminder: Don't forget to use our app!"
-    notification = Notification(user_email=user_email, message=default_message)
-    background_tasks.add_task(send_notification, notification)
-    return {"detail": "Notification scheduled successfully"}
-# -----------------------------------------------------------------
-
-
-
 
 class User(Base):
     __tablename__ = 'users'
@@ -487,7 +675,7 @@ class Place(Base):
     place_id = Column(Integer, primary_key=True)
     place_name = Column(String(255), nullable=False)
     price = Column(Integer, nullable=False)
-    gps = Column(String(255), nullable=False)
+    governorate = Column(String(255), nullable=False)
     place_loc = Column(String(255), nullable=False)
     place_image = Column(String(255), nullable=False)
     rate = Column(Integer)
@@ -497,23 +685,20 @@ class Hotel(Base):
     hotel_id = Column(Integer, primary_key=True)
     hotel_name = Column(String(255), nullable=False)
     price = Column(Integer, nullable=False)
-    gps = Column(String(255), nullable=False)
+    governorate = Column(String(255), nullable=False)
     hotel_loc = Column(String(255), nullable=False)
     hotel_image = Column(String(255), nullable=False)
     rate = Column(Integer)
-    hotel_type = Column(String)
 
 class Restaurant(Base):
     __tablename__ = 'restaurants'
     rest_id = Column(Integer, primary_key=True)
     rest_name = Column(String(255), nullable=False)
     price = Column(Integer, nullable=False)
-    #favorite = Column(Boolean)
-    gps = Column(String(255), nullable=False)
+    governorate = Column(String(255), nullable=False)
     rest_loc = Column(String(255), nullable=False)
     rest_image = Column(String(255), nullable=False)
     rate = Column(Integer)
-    rest_type = Column(String)
 
 class UserPlan(Base):
     __tablename__ = 'user_plan'
@@ -565,10 +750,8 @@ class UserFavorite(Base):
         user = relationship("User", back_populates="user_favs")
         favorite = relationship("Favorite", back_populates="user_favs")
 
-    # Create tables
 Base.metadata.create_all(bind=engine)
 
-    # CRUD operations
 def create_favorite(db: Session, user_id: int, type: str, name: str, location: str):
         db_favorite = Favorite(type=type, name=name, location=location)
         db.add(db_favorite)
@@ -845,9 +1028,12 @@ async def get_user_survey(current_user: str = Depends(get_current_user), db: Ses
 
         categories = [option.category for option in options]
 
-        return {"categories": categories}  
+        return {"categories": categories}
     except SQLAlchemyError as e:
         return {"message": f"Database error: {str(e)}"}
+
+
+
 
 @app.get("/protected")
 async def protected_endpoint(current_user: str = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -872,6 +1058,107 @@ async def protected_endpoint(current_user: str = Depends(get_current_user), db: 
 async def unprotected_endpoint():
 
     return {"message": "This endpoint is accessible without authentication."}
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=80)
+
+
+#--------------------------------------------------------
+from sqlalchemy.sql import func
+def query_random_places(db: Session, country: str):
+    random_places = db.query(
+        Place.place_name,
+        Place.price,
+        Place.governorate,
+        Place.place_loc,
+        Place.place_image,
+        Place.rate
+    ).filter(
+        Place.place_loc.ilike(f"%{country}%")
+    ).order_by(
+        func.newid()
+    ).limit(5).all()
+    return random_places
+def query_random_restaurants(db: Session, country: str):
+    random_restaurants = db.query(
+        Restaurant.rest_name,
+        Restaurant.price,
+        Restaurant.governorate,
+        Restaurant.rest_loc,
+        Restaurant.rest_image,
+        Restaurant.rate
+    ).filter(
+        Restaurant.rest_loc.ilike(f"%{country}%")
+    ).order_by(
+        func.newid()
+    ).limit(5).all()
+    return random_restaurants
+def query_random_hotels(db: Session, country: str):
+    random_hotels = db.query(
+        Hotel.hotel_name,
+        Hotel.price,
+        Hotel.governorate,
+        Hotel.hotel_loc,
+        Hotel.hotel_image,
+        Hotel.rate
+
+    ).filter(
+        Hotel.hotel_loc.ilike(f"%{country}%")
+    ).order_by(
+        func.newid()
+    ).limit(5).all()
+    return random_hotels
+
+@app.get("/discover_places/")
+async def get_discover_places(country: str, db: Session = Depends(get_db)):
+    random_places = query_random_places(db, country)
+    if not random_places:
+        raise HTTPException(status_code=404, detail="No random places found for the specified country")
+
+    result = [
+        {
+            "place_name": place[0],
+            "price": place[1],
+            "governorate": place[2],
+            "place_loc": place[3],
+            "place_image": place[4],
+            "rate": place[5]
+        } for place in random_places
+    ]
+
+    return {"random_places": result}
+
+@app.get("/discover_restaurants/")
+async def get_discover_restaurants(country: str, db: Session = Depends(get_db)):
+    random_restaurants = query_random_restaurants(db, country)
+    if not random_restaurants:
+        raise HTTPException(status_code=404, detail="No random restaurants found for the specified country")
+
+    result = [
+        {
+            "rest_name": restaurant[0],
+            "price": restaurant[1],
+            "governorate": restaurant[2],
+            "rest_loc": restaurant[3],
+            "rest_image": restaurant[4],
+            "rate": restaurant[5]
+        } for restaurant in random_restaurants
+    ]
+
+    return {"random_restaurants": result}
+@app.get("/discover_hotels/")
+async def get_discover_hotels(country: str, db: Session = Depends(get_db)):
+    random_hotels = query_random_hotels(db, country)
+    if not random_hotels:
+        raise HTTPException(status_code=404, detail="No random hotels found for the specified country")
+
+    result = [
+        {
+            "hotel_name": hotel[0],
+            "price": hotel[1],
+            "governorate": hotel[2],
+            "hotel_loc": hotel[3],
+            "hotel_image": hotel[4],
+            "rate": hotel[5]
+
+        } for hotel in random_hotels
+    ]
+
+    return {"random_hotels": result}
