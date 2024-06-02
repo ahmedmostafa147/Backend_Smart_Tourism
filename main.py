@@ -29,6 +29,7 @@ from fastapi.exceptions import RequestValidationError
 import re
 from starlette.middleware.sessions import SessionMiddleware
 import os
+from fastapi import Path
 
 load_dotenv()
 
@@ -759,14 +760,14 @@ def create_favorite(db: Session, user_id: int, type: str, name: str, location: s
         db.refresh(db_favorite)
         return db_favorite
 
-def delete_favorite(db: Session, fav_id: int):
-        db_favorite = db.query(Favorite).filter(Favorite.fav_id == fav_id).first()
-        if db_favorite:
-            db.delete(db_favorite)
-            db.commit()
-            return {"message": "Favorite deleted successfully"}
-        else:
-            raise HTTPException(status_code=404, detail="Favorite not found")
+def delete_favorite(db: Session, name: str):
+    db_favorite = db.query(Favorite).filter(Favorite.name == name).first()
+    if db_favorite:
+        db.delete(db_favorite)
+        db.commit()
+        return {"message": "Favorite deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Favorite not found")
 
 # Database session setup
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -949,24 +950,26 @@ def create_favorite_endpoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create favorite: {e}")
 
-@app.delete("/favorites/")
+
+@app.delete("/favorites/{name}")
 def delete_favorite_endpoint(
-    fav_id: int,
+    name: str = Path(..., title="Name of the favorite place"),
     current_user_email: str = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Delete a favorite for the current user.
+    Delete a favorite for the current user using the favorite name.
     """
     try:
         user = db.query(User).filter(User.user_email == current_user_email).first()
         if user:
-            result = delete_favorite(db=db, fav_id=fav_id)
+            result = delete_favorite(db=db, name=name)
             return result
         else:
             raise HTTPException(status_code=404, detail="User not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete favorite: {e}")
+
 
 
 # -------------------------------------------------------------------------
@@ -1162,3 +1165,11 @@ async def get_discover_hotels(country: str, db: Session = Depends(get_db)):
     ]
 
     return {"random_hotels": result}
+
+def main():
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    main()
