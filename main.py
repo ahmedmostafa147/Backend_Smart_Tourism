@@ -1169,7 +1169,5 @@ async def get_discover_hotels(country: str, db: Session = Depends(get_db)):
 def main():
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
 if __name__ == "__main__":
     main()
