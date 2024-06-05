@@ -195,8 +195,14 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
 
 def delete_user(user_email: str):
     conn = engine.connect()
-    conn.execute(users.delete().where(users.c.user_email == user_email))
-    conn.commit()
+    try:
+        conn.execute(users.delete().where(users.c.user_email == user_email))
+        conn.commit()
+    except SQLAlchemyError as e:
+        conn.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete user")
+    finally:
+        conn.close()
 
 
 def update_user(user_email: str, updated_user: UserUpdate):
